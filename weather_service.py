@@ -7,7 +7,9 @@ import requests
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-ALLOWED_PERSONAS = {"commuter", "farmer", "traveller", "runner"}
+# ALLOWED_PERSONAS is kept as an alias for compatibility with existing imports.
+ALLOWED_ROLES = {"runner", "farmer", "commuter", "traveller"}
+ALLOWED_PERSONAS = ALLOWED_ROLES
 
 WEATHER_CODES = {
     0: "Clear sky",
@@ -35,7 +37,7 @@ WEATHER_CODES = {
 
 
 class WeatherServiceError(Exception):
-    """An expected error while looking up a location or weather data."""
+    """Expected error while looking up a location or weather data."""
 
 
 def get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -44,25 +46,28 @@ def get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
         return response.json()
+
     except requests.Timeout as error:
         raise WeatherServiceError("Weather service took too long to respond.") from error
+
     except requests.RequestException as error:
         raise WeatherServiceError("Could not contact the weather service.") from error
+
     except ValueError as error:
         raise WeatherServiceError("Weather service returned invalid JSON.") from error
 
 
-def geocode_city(city: str) -> dict[str, Any]:
-    """Convert a city name such as Davangere into latitude and longitude."""
-    cleaned_city = city.strip()
+def geocode_location(location: str) -> dict[str, Any]:
+    """Convert a location name into latitude and longitude."""
+    cleaned_location = location.strip()
 
-    if not cleaned_city:
-        raise WeatherServiceError("City cannot be empty.")
+    if not cleaned_location:
+        raise WeatherServiceError("Location cannot be empty.")
 
     data = get_json(
         GEOCODING_URL,
         {
-            "name": cleaned_city,
+            "name": cleaned_location,
             "count": 1,
             "language": "en",
             "format": "json",
@@ -70,9 +75,10 @@ def geocode_city(city: str) -> dict[str, Any]:
     )
 
     results = data.get("results", [])
+
     if not results:
         raise WeatherServiceError(
-            f"Location '{cleaned_city}' was not found. Try a city name such as Davangere."
+            f"Location '{cleaned_location}' was not found. Try a city name such as Bengaluru."
         )
 
     place = results[0]
@@ -88,7 +94,7 @@ def geocode_city(city: str) -> dict[str, Any]:
 
 
 def fetch_weather(latitude: float, longitude: float) -> dict[str, Any]:
-    """Fetch the raw forecast from Open-Meteo."""
+    """Fetch current, hourly, and daily forecast data from Open-Meteo."""
     params = {
         "latitude": latitude,
         "longitude": longitude,
@@ -115,15 +121,12 @@ def fetch_weather(latitude: float, longitude: float) -> dict[str, Any]:
 
 
 def weather_description(code: int | None) -> str:
-    """Turn a numeric weather code into readable text."""
+    """Convert an Open-Meteo numeric weather code into readable text."""
     return WEATHER_CODES.get(code, "Unknown weather condition")
 
 
 def find_current_hour_index(hourly: dict[str, list[Any]], current_time: str) -> int:
-    """
-    Find the hourly item matching the current API timestamp.
-    Fall back to the first hourly value if the provider does not match exactly.
-    """
+    """Find the hourly forecast item closest to the current API timestamp."""
     times = hourly.get("time", [])
 
     try:
@@ -133,7 +136,7 @@ def find_current_hour_index(hourly: dict[str, list[Any]], current_time: str) -> 
 
 
 def make_hourly_preview(hourly: dict[str, list[Any]], start_index: int) -> list[dict[str, Any]]:
-    """Return only the next six hours, in an easy frontend-friendly structure."""
+    """Return the next six hourly forecast entries."""
     preview = []
     end_index = min(start_index + 6, len(hourly.get("time", [])))
 
@@ -143,9 +146,12 @@ def make_hourly_preview(hourly: dict[str, list[Any]], start_index: int) -> list[
                 "time": hourly["time"][index],
                 "temperature_c": hourly["temperature_2m"][index],
                 "feels_like_c": hourly["apparent_temperature"][index],
+                "humidity_percent": hourly["relative_humidity_2m"][index],
                 "rain_probability_percent": hourly["precipitation_probability"][index],
                 "precipitation_mm": hourly["precipitation"][index],
+                "rain_mm": hourly["rain"][index],
                 "wind_kmh": hourly["wind_speed_10m"][index],
+                "wind_gust_kmh": hourly["wind_gusts_10m"][index],
                 "visibility_m": hourly["visibility"][index],
                 "condition": weather_description(hourly["weather_code"][index]),
             }
@@ -179,8 +185,7 @@ def make_daily_preview(daily: dict[str, list[Any]]) -> list[dict[str, Any]]:
 
 def normalize_weather(location: dict[str, Any], raw_weather: dict[str, Any]) -> dict[str, Any]:
     """
-    Convert provider-specific raw API data into our own predictable response shape.
-    This is the boundary between the external API and your app.
+    Convert Open-Meteo provider data into the app's stable normalized structure.
     """
     current = raw_weather.get("current")
     hourly = raw_weather.get("hourly")
@@ -223,8 +228,19 @@ def normalize_weather(location: dict[str, Any], raw_weather: dict[str, Any]) -> 
     }
 
 
+def get_weather_for_location(location_name: str) -> dict[str, Any]:
+    """Get fully normalized weather for one location."""
+    location = geocode_location(location_name)
+    raw_weather = fetch_weather(location["latitude"], location["longitude"])
+    return normalize_weather(location, raw_weather)
+
+
 def create_alert(level: str, title: str, message: str) -> dict[str, str]:
-    return {"level": level, "title": title, "message": message}
+    return {
+        "level": level,
+        "title": title,
+        "message": message,
+    }
 
 
 def personalize_for_commuter(weather: dict[str, Any]) -> list[dict[str, str]]:
@@ -239,22 +255,38 @@ def personalize_for_commuter(weather: dict[str, Any]) -> list[dict[str, str]]:
 
     if rain_soon:
         alerts.append(
-            create_alert("high", "Rain likely", "Carry an umbrella; rain is likely in the next few hours.")
+            create_alert(
+                "high",
+                "Rain likely",
+                "Carry an umbrella and allow extra time for your commute.",
+            )
         )
 
     if current["visibility_m"] < 1000:
         alerts.append(
-            create_alert("high", "Low visibility", "Drive slowly and keep extra distance from other vehicles.")
+            create_alert(
+                "high",
+                "Low visibility",
+                "Drive slowly and keep extra distance from other vehicles.",
+            )
         )
 
     if current["wind_gust_kmh"] >= 40:
         alerts.append(
-            create_alert("medium", "Strong wind", "Take extra care when riding a two-wheeler.")
+            create_alert(
+                "medium",
+                "Strong wind",
+                "Take extra care when riding a two-wheeler.",
+            )
         )
 
     if not alerts:
         alerts.append(
-            create_alert("low", "Commute looks suitable", "No major rain, visibility, or wind concern detected.")
+            create_alert(
+                "low",
+                "Commute looks suitable",
+                "No major rain, visibility, or wind concern detected.",
+            )
         )
 
     return alerts
@@ -268,64 +300,27 @@ def personalize_for_farmer(weather: dict[str, Any]) -> list[dict[str, str]]:
 
     if today["rain_total_mm"] >= 10:
         alerts.append(
-            create_alert("high", "Heavy rain possible", "Check drainage and avoid irrigation before rainfall.")
+            create_alert(
+                "high",
+                "Heavy rain possible",
+                "Check drainage and avoid irrigation before expected rainfall.",
+            )
         )
     elif today["rain_total_mm"] >= 2:
         alerts.append(
-            create_alert("medium", "Rain expected", "Review irrigation plans; some rainfall is forecast today.")
+            create_alert(
+                "medium",
+                "Rain expected",
+                "Review irrigation plans because rainfall is forecast today.",
+            )
         )
 
     if soil_moisture < 0.15:
         alerts.append(
-            create_alert("medium", "Low surface soil moisture", "Inspect field moisture before deciding irrigation.")
-        )
-
-    if current["temperature_c"] >= 35:
-        alerts.append(
-            create_alert("medium", "High temperature", "Avoid relying on this alone; monitor crops for heat stress.")
-        )
-
-    if not alerts:
-        alerts.append(
-            create_alert("low", "No major field condition found", "Review the forecast before making farm decisions.")
-        )
-
-    return alerts
-
-
-def personalize_for_traveller(weather: dict[str, Any]) -> list[dict[str, str]]:
-    """
-    Gives travel-related alerts using the coming two days of forecast data.
-    """
-    current = weather["current"]
-    travel_days = weather["next_days"][:2]
-    alerts = []
-
-    heavy_rain = any(
-        day["max_rain_probability_percent"] >= 60 or day["rain_total_mm"] >= 10
-        for day in travel_days
-    )
-
-    strong_wind = any(
-        day["max_wind_gust_kmh"] >= 50
-        for day in travel_days
-    )
-
-    if heavy_rain:
-        alerts.append(
-            create_alert(
-                "high",
-                "Rain may affect travel",
-                "Check local travel conditions and carry rain protection.",
-            )
-        )
-
-    if strong_wind:
-        alerts.append(
             create_alert(
                 "medium",
-                "Strong wind forecast",
-                "Allow extra travel time and check transport updates.",
+                "Low surface soil moisture",
+                "Inspect field moisture before deciding irrigation.",
             )
         )
 
@@ -333,8 +328,8 @@ def personalize_for_traveller(weather: dict[str, Any]) -> list[dict[str, str]]:
         alerts.append(
             create_alert(
                 "medium",
-                "Hot travel conditions",
-                "Carry water and avoid long outdoor waiting where possible.",
+                "High temperature",
+                "Monitor crops for heat stress and avoid relying on forecast alone.",
             )
         )
 
@@ -342,8 +337,8 @@ def personalize_for_traveller(weather: dict[str, Any]) -> list[dict[str, str]]:
         alerts.append(
             create_alert(
                 "low",
-                "Travel outlook looks suitable",
-                "No major rain or strong-wind concern is detected in the next two days.",
+                "No major field condition found",
+                "Review the forecast before making farm decisions.",
             )
         )
 
@@ -351,9 +346,6 @@ def personalize_for_traveller(weather: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def personalize_for_runner(weather: dict[str, Any]) -> list[dict[str, str]]:
-    """
-    Finds suitable outdoor-running conditions from the next six hourly forecasts.
-    """
     current = weather["current"]
     next_hours = weather["next_hours"]
     today = weather["next_days"][0]
@@ -410,64 +402,258 @@ def personalize_for_runner(weather: dict[str, Any]) -> list[dict[str, str]]:
     return alerts
 
 
-def get_personalized_widgets(persona: str) -> list[dict[str, str]]:
+def personalize_for_traveller(
+    current_weather: dict[str, Any],
+    destination_weather: dict[str, Any],
+) -> tuple[list[dict[str, str]], str]:
     """
-    Tells the frontend which cards should be prominent for each persona.
+    Generate traveller alerts and a recommendation using destination weather.
     """
+    destination_current = destination_weather["current"]
+    destination_days = destination_weather["next_days"][:2]
+    alerts = []
+
+    heavy_rain = any(
+        day["max_rain_probability_percent"] >= 60 or day["rain_total_mm"] >= 10
+        for day in destination_days
+    )
+
+    strong_wind = any(
+        day["max_wind_gust_kmh"] >= 50
+        for day in destination_days
+    )
+
+    if heavy_rain:
+        alerts.append(
+            create_alert(
+                "high",
+                "Rain may affect your destination",
+                "Check local transport conditions and carry rain protection.",
+            )
+        )
+
+    if strong_wind:
+        alerts.append(
+            create_alert(
+                "medium",
+                "Strong wind at destination",
+                "Allow extra travel time and check transport updates.",
+            )
+        )
+
+    if destination_current["temperature_c"] >= 35:
+        alerts.append(
+            create_alert(
+                "medium",
+                "Hot destination conditions",
+                "Carry water and avoid long outdoor waiting where possible.",
+            )
+        )
+
+    if not alerts:
+        alerts.append(
+            create_alert(
+                "low",
+                "Travel outlook looks suitable",
+                "No major rain or strong-wind concern is detected at the destination.",
+            )
+        )
+
+    if heavy_rain or strong_wind:
+        recommendation = (
+            "Travel is possible, but check local transport updates and keep extra time."
+        )
+    elif destination_current["temperature_c"] >= 35:
+        recommendation = (
+            "Travel conditions look acceptable, but plan hydration and avoid peak heat."
+        )
+    else:
+        recommendation = (
+            "Destination weather looks generally suitable for travel."
+        )
+
+    return alerts, recommendation
+
+
+def compact_weather(weather: dict[str, Any]) -> dict[str, Any]:
+    """
+    Small shared weather shape used by Member 1's personalized homepage.
+    """
+    current = weather["current"]
+    today = weather["next_days"][0]
+
+    return {
+        "temperature": current["temperature_c"],
+        "humidity": current["humidity_percent"],
+        "rainfall": current["rain_mm"],
+        "wind_speed": current["wind_kmh"],
+        "visibility": current["visibility_m"],
+        "uv_index": today["max_uv_index"],
+        "sunrise": today["sunrise"],
+        "sunset": today["sunset"],
+        "condition": current["condition"],
+    }
+
+
+def build_personalized_weather(
+    role: str,
+    weather: dict[str, Any],
+    alerts: list[dict[str, str]],
+    destination_weather: dict[str, Any] | None = None,
+    travel_recommendation: str | None = None,
+) -> dict[str, Any]:
+    """
+    Build only the important frontend data for each role.
+    """
+    current = compact_weather(weather)
+
+    if role == "runner":
+        return {
+            "temperature": current["temperature"],
+            "wind_speed": current["wind_speed"],
+            "uv_index": current["uv_index"],
+            "sunrise": current["sunrise"],
+            "sunset": current["sunset"],
+            "weather_alerts": alerts,
+        }
+
+    if role == "farmer":
+        return {
+            "temperature": current["temperature"],
+            "humidity": current["humidity"],
+            "rainfall": current["rainfall"],
+            "weather_alerts": alerts,
+        }
+
+    if role == "commuter":
+        return {
+            "rainfall": current["rainfall"],
+            "visibility": current["visibility"],
+            "weather_alerts": alerts,
+        }
+
+    if destination_weather is None or travel_recommendation is None:
+        raise WeatherServiceError("Traveller weather requires a destination.")
+
+    destination = compact_weather(destination_weather)
+
+    return {
+        "current_location": {
+            "temperature": current["temperature"],
+            "humidity": current["humidity"],
+            "rainfall": current["rainfall"],
+            "wind_speed": current["wind_speed"],
+        },
+        "destination": {
+            "place": destination_weather["location"]["name"],
+            "temperature": destination["temperature"],
+            "humidity": destination["humidity"],
+            "rainfall": destination["rainfall"],
+            "wind_speed": destination["wind_speed"],
+            "sunrise": destination["sunrise"],
+            "sunset": destination["sunset"],
+        },
+        "weather_alerts": alerts,
+        "travel_recommendation": travel_recommendation,
+    }
+
+
+def get_personalized_widgets(role: str) -> list[dict[str, str]]:
+    """Tell the frontend which cards should be prominent for each role."""
     widgets = {
-        "commuter": [
-            {"id": "commute_alerts", "title": "Commute Alerts", "data": "alerts"},
-            {"id": "current_weather", "title": "Current Weather", "data": "weather.current"},
-            {"id": "hourly_forecast", "title": "Next Hours", "data": "weather.next_hours"},
+        "runner": [
+            {"id": "running_advice", "title": "Running Advice", "data": "personalized_weather"},
+            {"id": "current_weather", "title": "Current Conditions", "data": "weather.current"},
+            {"id": "hourly_forecast", "title": "Running Window", "data": "weather.next_hours"},
         ],
         "farmer": [
             {"id": "farm_alerts", "title": "Farm Alerts", "data": "alerts"},
             {"id": "soil_moisture", "title": "Surface Soil Moisture", "data": "weather.farmer_data"},
             {"id": "rain_forecast", "title": "Rain Forecast", "data": "weather.next_days"},
         ],
+        "commuter": [
+            {"id": "commute_alerts", "title": "Commute Alerts", "data": "alerts"},
+            {"id": "current_weather", "title": "Current Weather", "data": "weather.current"},
+            {"id": "hourly_forecast", "title": "Next Hours", "data": "weather.next_hours"},
+        ],
         "traveller": [
             {"id": "travel_alerts", "title": "Travel Alerts", "data": "alerts"},
-            {"id": "current_weather", "title": "Current Weather", "data": "weather.current"},
-            {"id": "travel_outlook", "title": "Two-Day Outlook", "data": "weather.next_days"},
-        ],
-        "runner": [
-            {"id": "running_advice", "title": "Running Advice", "data": "alerts"},
-            {"id": "current_weather", "title": "Current Conditions", "data": "weather.current"},
-            {"id": "hourly_forecast", "title": "Running Window", "data": "weather.next_hours"},
+            {"id": "current_weather", "title": "Current Location", "data": "current_location.current"},
+            {"id": "destination_weather", "title": "Destination Weather", "data": "destination.current"},
         ],
     }
 
-    return widgets[persona]
+    return widgets[role]
 
 
-def get_personalized_homepage(city: str, persona: str) -> dict[str, Any]:
+def get_personalized_homepage(
+    location: str,
+    role: str,
+    destination: str | None = None,
+) -> dict[str, Any]:
     """
-    This is the only function Member 1 needs to call.
+    Main Member 2 function for Member 1's Flask backend.
+
+    location: user's current location
+    role: runner, farmer, commuter, or traveller
+    destination: required only for traveller
     """
-    selected_persona = persona.strip().lower()
+    selected_role = role.strip().lower()
 
-    if selected_persona not in ALLOWED_PERSONAS:
-        valid = ", ".join(sorted(ALLOWED_PERSONAS))
-        raise WeatherServiceError(f"Unsupported persona. Choose one of: {valid}.")
+    if selected_role not in ALLOWED_ROLES:
+        valid_roles = ", ".join(sorted(ALLOWED_ROLES))
+        raise WeatherServiceError(f"Unsupported role. Choose one of: {valid_roles}.")
 
-    location = geocode_city(city)
-    raw_weather = fetch_weather(location["latitude"], location["longitude"])
-    weather = normalize_weather(location, raw_weather)
+    current_weather = get_weather_for_location(location)
 
-    if selected_persona == "commuter":
-        alerts = personalize_for_commuter(weather)
-    elif selected_persona == "farmer":
-        alerts = personalize_for_farmer(weather)
-    elif selected_persona == "traveller":
-        alerts = personalize_for_traveller(weather)
+    if selected_role == "runner":
+        alerts = personalize_for_runner(current_weather)
+
+    elif selected_role == "farmer":
+        alerts = personalize_for_farmer(current_weather)
+
+    elif selected_role == "commuter":
+        alerts = personalize_for_commuter(current_weather)
+
     else:
-        alerts = personalize_for_runner(weather)
+        if not isinstance(destination, str) or not destination.strip():
+            raise WeatherServiceError(
+                "Destination is required when role is traveller."
+            )
+
+        destination_weather = get_weather_for_location(destination)
+        alerts, travel_recommendation = personalize_for_traveller(
+            current_weather,
+            destination_weather,
+        )
+
+        return {
+            "success": True,
+            "role": selected_role,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "alerts": alerts,
+            "widgets": get_personalized_widgets(selected_role),
+            "current_location": current_weather,
+            "destination": destination_weather,
+            "personalized_weather": build_personalized_weather(
+                selected_role,
+                current_weather,
+                alerts,
+                destination_weather,
+                travel_recommendation,
+            ),
+        }
 
     return {
         "success": True,
-        "persona": selected_persona,
+        "role": selected_role,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "alerts": alerts,
-        "widgets": get_personalized_widgets(selected_persona),
-        "weather": weather,
+        "widgets": get_personalized_widgets(selected_role),
+        "weather": current_weather,
+        "personalized_weather": build_personalized_weather(
+            selected_role,
+            current_weather,
+            alerts,
+        ),
     }
