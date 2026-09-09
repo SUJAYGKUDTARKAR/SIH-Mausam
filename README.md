@@ -10,7 +10,8 @@ Backend module for the SIH26076 Mausam personalized homepage prototype.
 - Personas:
   - commuter
   - farmer
-  - fitness
+  - traveller
+  - runner
 - Error handling for invalid city names and personas
 
 ## Setup
@@ -53,7 +54,7 @@ Invoke-RestMethod `
 }
 ```
 
-Allowed personas: `commuter`, `farmer`, `fitness`.
+Allowed personas: `commuter`, `farmer`, `traveller`, `runner`.
 
 ## Main endpoint
 

@@ -7,7 +7,7 @@ import requests
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-ALLOWED_PERSONAS = {"commuter", "farmer", "fitness"}
+ALLOWED_PERSONAS = {"commuter", "farmer", "traveller", "runner"}
 
 WEATHER_CODES = {
     0: "Clear sky",
@@ -293,35 +293,151 @@ def personalize_for_farmer(weather: dict[str, Any]) -> list[dict[str, str]]:
     return alerts
 
 
-def personalize_for_fitness(weather: dict[str, Any]) -> list[dict[str, str]]:
+def personalize_for_traveller(weather: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    Gives travel-related alerts using the coming two days of forecast data.
+    """
     current = weather["current"]
-    today = weather["next_days"][0]
-    next_hours = weather["next_hours"]
+    travel_days = weather["next_days"][:2]
     alerts = []
 
-    rain_soon = any(hour["rain_probability_percent"] >= 50 for hour in next_hours)
+    heavy_rain = any(
+        day["max_rain_probability_percent"] >= 60 or day["rain_total_mm"] >= 10
+        for day in travel_days
+    )
 
-    if rain_soon:
+    strong_wind = any(
+        day["max_wind_gust_kmh"] >= 50
+        for day in travel_days
+    )
+
+    if heavy_rain:
         alerts.append(
-            create_alert("medium", "Rain may interrupt activity", "Consider indoor exercise or carry rain protection.")
+            create_alert(
+                "high",
+                "Rain may affect travel",
+                "Check local travel conditions and carry rain protection.",
+            )
         )
 
-    if current["feels_like_c"] >= 35:
+    if strong_wind:
         alerts.append(
-            create_alert("high", "Very hot conditions", "Prefer a cooler time and drink sufficient water.")
+            create_alert(
+                "medium",
+                "Strong wind forecast",
+                "Allow extra travel time and check transport updates.",
+            )
         )
 
-    if today["max_uv_index"] >= 8:
+    if current["temperature_c"] >= 35:
         alerts.append(
-            create_alert("medium", "High UV forecast", "Use sun protection for outdoor activity.")
+            create_alert(
+                "medium",
+                "Hot travel conditions",
+                "Carry water and avoid long outdoor waiting where possible.",
+            )
         )
 
     if not alerts:
         alerts.append(
-            create_alert("low", "Outdoor activity looks suitable", "No major rain, heat, or UV concern detected.")
+            create_alert(
+                "low",
+                "Travel outlook looks suitable",
+                "No major rain or strong-wind concern is detected in the next two days.",
+            )
         )
 
     return alerts
+
+
+def personalize_for_runner(weather: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    Finds suitable outdoor-running conditions from the next six hourly forecasts.
+    """
+    current = weather["current"]
+    next_hours = weather["next_hours"]
+    today = weather["next_days"][0]
+    alerts = []
+
+    suitable_hour = next(
+        (
+            hour
+            for hour in next_hours
+            if hour["rain_probability_percent"] < 30
+            and hour["precipitation_mm"] < 0.2
+            and 16 <= hour["feels_like_c"] <= 32
+            and hour["wind_kmh"] < 25
+            and hour["visibility_m"] >= 1000
+        ),
+        None,
+    )
+
+    if current["feels_like_c"] >= 35:
+        alerts.append(
+            create_alert(
+                "high",
+                "Too hot for strenuous running",
+                "Choose a cooler time, reduce intensity, and drink water.",
+            )
+        )
+
+    if today["max_uv_index"] >= 8:
+        alerts.append(
+            create_alert(
+                "medium",
+                "High UV forecast",
+                "Avoid peak sun where possible and use sun protection.",
+            )
+        )
+
+    if suitable_hour:
+        alerts.append(
+            create_alert(
+                "low",
+                "Suggested running window",
+                f"Conditions look relatively suitable around {suitable_hour['time']}.",
+            )
+        )
+    else:
+        alerts.append(
+            create_alert(
+                "medium",
+                "No ideal running window found",
+                "Check the hourly forecast again later or consider indoor exercise.",
+            )
+        )
+
+    return alerts
+
+
+def get_personalized_widgets(persona: str) -> list[dict[str, str]]:
+    """
+    Tells the frontend which cards should be prominent for each persona.
+    """
+    widgets = {
+        "commuter": [
+            {"id": "commute_alerts", "title": "Commute Alerts", "data": "alerts"},
+            {"id": "current_weather", "title": "Current Weather", "data": "weather.current"},
+            {"id": "hourly_forecast", "title": "Next Hours", "data": "weather.next_hours"},
+        ],
+        "farmer": [
+            {"id": "farm_alerts", "title": "Farm Alerts", "data": "alerts"},
+            {"id": "soil_moisture", "title": "Surface Soil Moisture", "data": "weather.farmer_data"},
+            {"id": "rain_forecast", "title": "Rain Forecast", "data": "weather.next_days"},
+        ],
+        "traveller": [
+            {"id": "travel_alerts", "title": "Travel Alerts", "data": "alerts"},
+            {"id": "current_weather", "title": "Current Weather", "data": "weather.current"},
+            {"id": "travel_outlook", "title": "Two-Day Outlook", "data": "weather.next_days"},
+        ],
+        "runner": [
+            {"id": "running_advice", "title": "Running Advice", "data": "alerts"},
+            {"id": "current_weather", "title": "Current Conditions", "data": "weather.current"},
+            {"id": "hourly_forecast", "title": "Running Window", "data": "weather.next_hours"},
+        ],
+    }
+
+    return widgets[persona]
 
 
 def get_personalized_homepage(city: str, persona: str) -> dict[str, Any]:
@@ -342,13 +458,16 @@ def get_personalized_homepage(city: str, persona: str) -> dict[str, Any]:
         alerts = personalize_for_commuter(weather)
     elif selected_persona == "farmer":
         alerts = personalize_for_farmer(weather)
+    elif selected_persona == "traveller":
+        alerts = personalize_for_traveller(weather)
     else:
-        alerts = personalize_for_fitness(weather)
+        alerts = personalize_for_runner(weather)
 
     return {
         "success": True,
         "persona": selected_persona,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "alerts": alerts,
+        "widgets": get_personalized_widgets(selected_persona),
         "weather": weather,
     }

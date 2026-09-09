@@ -37,7 +37,7 @@ def personalized_homepage():
         return jsonify(
             {
                 "success": False,
-                "error": "Field 'persona' must be commuter, farmer, or fitness.",
+                "error": "Field 'persona' must be commuter, farmer, traveller, or runner.",
             }
         ), 400
 
