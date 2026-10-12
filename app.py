@@ -1,67 +1,107 @@
-from flask import Flask, jsonify, request
+from database import init_database, save_user
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-from weather_service import ALLOWED_PERSONAS, WeatherServiceError, get_personalized_homepage
+from weather_service import (
+    get_personalized_homepage,
+    WeatherServiceError
+)
+
 
 app = Flask(__name__)
+CORS(app)
+
+init_database()
 
 
-@app.get("/health")
+@app.route("/")
+def home():
+    return "Mausam Backend is Running!"
+
+
+@app.route("/api/health")
 def health():
-    return jsonify({"success": True, "message": "Mausam backend is running"}), 200
+    return jsonify({
+        "status": "success",
+        "message": "Backend is working"
+    })
 
 
-@app.post("/api/homepage")
-def personalized_homepage():
-    data = request.get_json(silent=True)
+@app.route("/api/personalize", methods=["POST"])
+def personalize():
 
-    if not isinstance(data, dict):
-        return jsonify(
-            {
-                "success": False,
-                "error": "Request body must be valid JSON.",
-            }
-        ), 400
+    data = request.get_json()
 
-    city = data.get("city")
-    persona = data.get("persona")
+    if not data:
+        return jsonify({
+            "status": "error",
+            "message": "No JSON data received"
+        }), 400
 
-    if not isinstance(city, str) or not city.strip():
-        return jsonify(
-            {
-                "success": False,
-                "error": "Field 'city' must be a non-empty string.",
-            }
-        ), 400
+    role = data.get("role")
+    current_location = data.get("location")
+    destination = data.get("destination")
 
-    if not isinstance(persona, str) or persona.strip().lower() not in ALLOWED_PERSONAS:
-        return jsonify(
-            {
-                "success": False,
-                "error": "Field 'persona' must be commuter, farmer, traveller, or runner.",
-            }
-        ), 400
+    if not role:
+        return jsonify({
+            "status": "error",
+            "message": "Role is required"
+        }), 400
+
+    if not current_location:
+        return jsonify({
+            "status": "error",
+            "message": "Location is required"
+        }), 400
+
+    role = role.strip().lower()
+
+    # Traveller requires destination
+    if role == "traveller" and not destination:
+        return jsonify({
+            "status": "error",
+            "message": "Destination is required for traveller"
+        }), 400
+
+    # Save user's personalization choice in SQLite
+    user_id = save_user(
+        location=current_location,
+        role=role,
+        destination=destination
+    )
 
     try:
-        result = get_personalized_homepage(city, persona)
-        return jsonify(result), 200
+
+        # Get personalized weather from Member 2's weather service
+        result = get_personalized_homepage(
+            location=current_location,
+            role=role,
+            destination=destination
+        )
+
+        # Add database user ID
+        result["user_id"] = user_id
+
+        # Keep API status compatible with our existing backend
+        result["status"] = "success"
+
+        return jsonify(result)
 
     except WeatherServiceError as error:
-        return jsonify(
-            {
-                "success": False,
-                "error": str(error),
-            }
-        ), 502
 
-    except Exception:
-        # Keep implementation details out of the API response.
-        return jsonify(
-            {
-                "success": False,
-                "error": "Unexpected server error.",
-            }
-        ), 500
+        return jsonify({
+            "status": "error",
+            "message": str(error)
+        }), 400
+
+    except Exception as error:
+
+        return jsonify({
+            "status": "error",
+            "message": "Unexpected backend error",
+            "details": str(error)
+        }), 500
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
